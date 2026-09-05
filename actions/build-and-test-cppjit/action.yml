@@ -33,6 +33,18 @@ inputs:
     description: |
       Also run the xfail(run=False) crash-class tests; a test that passes
       (a strict xpass — its marker went stale) fails the job.
+  coverage:
+    required: false
+    default: 'false'
+    description: |
+      Build libcppjit with the clang under llvm-prefix, instrumented for
+      source-based coverage, and export lcov (C++) and Cobertura XML
+      (Python) reports. The whole cell, CppInterOp sub-build included,
+      compiles with that clang; only cppjit's own sources are instrumented.
+  llvm-prefix:
+    required: false
+    default: ''
+    description: 'setup-llvm install prefix; bin/ holds clang, llvm-profdata and llvm-cov. Needed with coverage.'
 
 runs:
   using: composite
@@ -60,11 +72,14 @@ runs:
         path: cppinterop-src
 
     - name: Build and install CppJIT
+      id: build
       shell: bash
       env:
         CPPINTEROP_REF: ${{ inputs.cppinterop-ref }}
         CLING: ${{ inputs.cling }}
         VALGRIND: ${{ inputs.valgrind }}
+        COVERAGE: ${{ inputs.coverage }}
+        LLVM_PREFIX: ${{ inputs.llvm-prefix }}
       run: |
         set -euo pipefail
         if [[ "${RUNNER_OS}" == "macOS" ]]; then
@@ -80,6 +95,16 @@ runs:
         [[ "${CLING}" == "true" ]] && EXTRA_ARGS+=(--config-settings=cmake.define.CPPJIT_USE_CLING=ON)
         [[ -n "${CPPINTEROP_REF}" ]] && EXTRA_ARGS+=(--config-settings=cmake.define.CPPINTEROP_SOURCE_DIR="${GITHUB_WORKSPACE}/cppinterop-src")
         [[ "${VALGRIND}" == "true" ]] && EXTRA_ARGS+=(--config-settings=cmake.build-type=RelWithDebInfo --config-settings=install.strip=false)
+        if [[ "${COVERAGE}" == "true" ]]; then
+          EXTRA_ARGS+=(
+            --config-settings=cmake.define.CPPJIT_COVERAGE=ON
+            --config-settings=cmake.define.CMAKE_C_COMPILER="${LLVM_PREFIX}/bin/clang"
+            --config-settings=cmake.define.CMAKE_CXX_COMPILER="${LLVM_PREFIX}/bin/clang++"
+            # CMake picks the llvm-strip beside clang; its default --strip-all
+            # drops the non-alloc __llvm_covmap/__llvm_covfun llvm-cov reads.
+            --config-settings=install.strip=false
+          )
+        fi
         python -m pip install . -v \
           --config-settings=cmake.define.LLVM_DIR="${LLVM_DIR}" \
           ${EXTRA_ARGS[@]+"${EXTRA_ARGS[@]}"}
@@ -99,11 +124,23 @@ runs:
         VALGRIND: ${{ inputs.valgrind }}
         RUN_XFAIL_CRASHING_TESTS: ${{ inputs.run-xfail-crashing-tests }}
         LLVM_VERSION: ${{ inputs.llvm-version }}
+        COVERAGE: ${{ inputs.coverage }}
       run: |
         set -uo pipefail
         cd test
         make -j4 PYTHON=python || { echo "::error::dictionary build (make) failed"; exit 1; }
         export CPPINTEROP_EXTRA_INTERPRETER_ARGS="-std=c++${CXX_STD}"
+
+        COV_ARGS=()
+        if [[ "${COVERAGE}" == "true" ]]; then
+          # One merge pool for every process that loads libcppjit (xdist
+          # workers, spawned children). coverage.py searches only the current
+          # directory for its config, so the pyproject is named explicitly.
+          mkdir -p "${RUNNER_TEMP}/coverage"
+          export LLVM_PROFILE_FILE="${RUNNER_TEMP}/coverage/cppjit-%m.profraw"
+          export COVERAGE_FILE="${RUNNER_TEMP}/coverage/python.coverage"
+          COV_ARGS=(--cov --cov-config="${GITHUB_WORKSPACE}/pyproject.toml" --cov-report=)
+        fi
 
         RETCODE=0
 
@@ -113,7 +150,7 @@ runs:
         # conftest keeps each file's tests together on one of them.
         set -o pipefail
         python -m pytest -ra --tb=short -p no:cacheprovider --durations=25 \
-          -n auto --max-worker-restart 2 \
+          -n auto --max-worker-restart 2 ${COV_ARGS[@]+"${COV_ARGS[@]}"} \
           | tee "${RUNNER_TEMP}/complete_testrun.log" 2>&1 || RETCODE=$?
         set +o pipefail
         tail -n1 "${RUNNER_TEMP}/complete_testrun.log" > "${GITHUB_WORKSPACE}/pytest-summary.txt" || true
@@ -152,3 +189,18 @@ runs:
 
         echo "Summary: $(cat "${GITHUB_WORKSPACE}/pytest-summary.txt" 2>/dev/null || echo 'no summary')"
         exit "${RETCODE}"
+
+    # Reports leave whatever the suite's verdict was; Codecov gates on CI itself.
+    - name: Export coverage reports
+      if: ${{ !cancelled() && inputs.coverage == 'true' && steps.build.outcome == 'success' }}
+      shell: bash
+      env:
+        LLVM_PREFIX: ${{ inputs.llvm-prefix }}
+      run: |
+        set -euo pipefail
+        python "${GITHUB_ACTION_PATH}/export_coverage.py" \
+          --llvm-prefix "${LLVM_PREFIX}" \
+          --profiles "${RUNNER_TEMP}/coverage" \
+          --python-data "${RUNNER_TEMP}/coverage/python.coverage" \
+          --source-root "${GITHUB_WORKSPACE}" \
+          --out "${RUNNER_TEMP}/coverage-reports"
