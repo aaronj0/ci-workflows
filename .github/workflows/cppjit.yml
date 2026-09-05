@@ -55,6 +55,14 @@ on:
         type: boolean
         default: false
         description: 'Run the xfail-crash and xfail->skipif sweeps.'
+      coverage:
+        type: boolean
+        default: false
+        description: |
+          Coverage cell: build libcppjit with the cell's clang, instrumented
+          for source-based coverage, and upload lcov + Cobertura XML as the
+          coverage-<cell> artifact. Linux flavor:system only (needs llvm-cov,
+          llvm-profdata and compiler-rt's profile runtime).
       ci-workflows-ref:
         type: string
         default: main
@@ -71,6 +79,9 @@ jobs:
   build-test:
     runs-on: ${{ inputs.os }}
     name: run
+    env:
+      # The cell's identity, as the artifact names carry it.
+      CELL: ${{ inputs.os }}-llvm${{ inputs.llvm-version }}-py${{ inputs.python-version }}-cxx${{ inputs.cxx-standard }}${{ inputs.valgrind && '-vg' || '' }}${{ inputs.coverage && '-cov' || '' }}${{ inputs.llvm-flavor == 'cling' && '-cling' || '' }}
     outputs:
       summary: ${{ steps.summary.outputs.line }}
     steps:
@@ -119,6 +130,7 @@ jobs:
         run: echo "${MAMBA_ROOT_PREFIX:-$HOME/micromamba}/envs/valgrind-env/bin" >> "${GITHUB_PATH}"
 
       - name: Setup LLVM ${{ inputs.llvm-version }}
+        id: llvm
         uses: compiler-research/ci-workflows/actions/setup-llvm@main
         with:
           version: ${{ inputs.llvm-version }}
@@ -136,6 +148,8 @@ jobs:
           valgrind: ${{ inputs.valgrind }}
           run-xfail-crashing-tests: ${{ inputs.run-xfail-crashing-tests }}
           cling: ${{ inputs.llvm-flavor == 'cling' }}
+          coverage: ${{ inputs.coverage }}
+          llvm-prefix: ${{ steps.llvm.outputs.prefix }}
 
       - name: Capture summary
         id: summary
@@ -152,6 +166,14 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: result-${{ inputs.os }}-llvm${{ inputs.llvm-version }}-py${{ inputs.python-version }}-cxx${{ inputs.cxx-standard }}${{ inputs.valgrind && '-vg' || '' }}${{ inputs.llvm-flavor == 'cling' && '-cling' || '' }}
+          name: result-${{ env.CELL }}
           path: ${{ github.workspace }}/pytest-summary.txt
           if-no-files-found: warn
+
+      - name: Upload coverage reports
+        if: ${{ !cancelled() && inputs.coverage }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage-${{ env.CELL }}
+          path: ${{ runner.temp }}/coverage-reports/
+          if-no-files-found: error
