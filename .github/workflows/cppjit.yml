@@ -140,7 +140,7 @@ jobs:
           ref: ${{ inputs.ci-workflows-ref }}
 
       - name: Build and test
-        uses: compiler-research/ci-workflows/actions/build-and-test-cppjit@main
+        uses: aaronj0/ci-workflows/actions/build-and-test-cppjit@cppjit-coverage
         with:
           cppinterop-ref: ${{ inputs.cppinterop-ref }}
           cxx-standard: ${{ inputs.cxx-standard }}
